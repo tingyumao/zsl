@@ -176,7 +176,6 @@ def assign_bbox_to_anchors(config, image_bbox, anchors, image_id):
     image_bbox = [x1, y1, x2, y2]
 
     cnt = 0
-    iou_test = []
     max_iou = 0.0
     max_t = []
     max_index = 0
@@ -185,27 +184,29 @@ def assign_bbox_to_anchors(config, image_bbox, anchors, image_id):
         py += feature_stride / 2
         px += feature_stride / 2
         px1, py1, px2, py2 = px - pw / 2, py - ph / 2, px + pw / 2, py + ph / 2
+        
+        # calculate tx, ty, tw, th
+        tx = (xc - px + feature_stride / 2) / feature_stride
+        ty = (yc - py + feature_stride / 2) / feature_stride
+        tw = np.log(w / float(pw))
+        th = np.log(h / float(ph))
+        
+        iou_latest = iou(image_bbox, [px1, py1, px2, py2])
 
-        if iou(image_bbox, [px1, py1, px2, py2]) > 0.5:
-            # calculate tx, ty, tw, th
-            tx = (xc - px + feature_stride / 2) / feature_stride
-            ty = (yc - py + feature_stride / 2) / feature_stride
-            tw = np.log(w / float(pw))
-            th = np.log(h / float(ph))
-
-            iou_test.append(iou(image_bbox, [px1, py1, px2, py2]))
+        if iou_latest > 0.5:
             gt_target_object[i] = 1.0
             cnt += 1
 
-            if 0 <= tx <= 1 and 0 <= ty <= 1:
-                if iou_test[-1] > max_iou:
-                    max_t = [tx, ty, tw, th]
-                    max_index = i
-                    max_iou = iou_test[-1]
+        if 0 <= tx <= 1 and 0 <= ty <= 1:
+            if iou_latest > max_iou:
+                max_t = [tx, ty, tw, th]
+                max_index = i
+                max_iou = iou_latest
 
-    assert cnt > 0, print(image_id)
+    # assert cnt > 0, print(image_id)
     assert max_t != list(), print(image_id)
-
+    
+    gt_target_object[max_index] = 1.0
     gt_target_bbox_object[max_index] = 1.0
     gt_target_bbox[max_index] = max_t
 
@@ -418,7 +419,7 @@ class ZSL():
         # Callbacks
         callbacks = [
             keras.callbacks.TensorBoard(log_dir=self.log_dir,
-                                        histogram_freq=5, write_graph=True, write_images=True, write_grads=True),
+                                        histogram_freq=0, write_graph=True, write_images=False, write_grads=False),
             keras.callbacks.ModelCheckpoint(self.checkpoint_path,
                                             verbose=0, save_weights_only=True),
         ]

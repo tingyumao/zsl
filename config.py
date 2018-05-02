@@ -32,7 +32,7 @@ class Config(object):
     # handle 2 images of 1024x1024px.
     # Adjust based on your GPU memory and image sizes. Use the highest
     # number that your GPU can handle for best performance.
-    IMAGES_PER_GPU = 1
+    IMAGES_PER_GPU = 4
 
     # Number of training steps per epoch
     # This doesn't need to match the size of the training set. Tensorboard
@@ -50,7 +50,7 @@ class Config(object):
 
     # Anchor settings
     FEATURE_STRIDE = 32
-    ANCHOR_SCALES = [[128, 256], [32, 64], [16]]
+    ANCHOR_SCALES = [[200, 256], [80, 128], [20, 40]]
     ANCHOR_RATIOS = [0.5, 2]
 
     # Attribute settings
