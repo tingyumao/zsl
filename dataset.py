@@ -184,7 +184,7 @@ class CAIData(object):
 
         image_class = self.class_dict[image_class_label]
 
-        print("Image {} belongs to class {} and bbox is {}".format(path, image_class, bbox))
+        print("ImageID: {}, Image {} belongs to class {} and bbox is {}".format(image_id, path, image_class, bbox))
 
         if path in self.attr_class_dict:
             print("This sample has its own attribute annotation.")

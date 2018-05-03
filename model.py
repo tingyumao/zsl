@@ -29,44 +29,57 @@ from module import *
 
 
 def yolov3_image_feature_graph(input_image):
-    # feature extractor: darknet53
-    darknet_feature = darknet_graph(input_image, architecture='darknet53')
-    feature_map = KL.Conv2D(1024, (1, 1), strides=(1, 1), padding="SAME", name='darknet_output_conv', use_bias=True)(darknet_feature)
-
-    return feature_map
-
-
-def yolo_predict(detection, anchors):
     pass
 
 
-def yolo_loss(detection, target_object, target_bbox, target_bbox_object):
+def yolo_predict(detection, anchors):
+    """
+    Only choose the anchor with the maximal objectiveness score, as there is only one bounding box in each image.
+
+    :param detection:
+    :param anchors:
+    :return:
+    """
+    pass
+
+
+def yolo_object_loss(detection, target_object):
     """
 
-    :param detection: None, 192, 5
-    :param target_bbox: None, 192, 4
-    :param target_object: None, 192
+    :param detection: None, num_anchors, 5
+    :param target_object: None, num_anchors
     :return:
     """
     to = detection[..., 0]
-    ty = K.expand_dims(detection[..., 1], axis=-1)
-    tx = K.expand_dims(detection[..., 2], axis=-1)
-    th = K.expand_dims(detection[..., 3], axis=-1)
-    tw = K.expand_dims(detection[..., 4], axis=-1)
-
     to = KL.Activation('sigmoid')(to)
-    ty = KL.Activation('sigmoid')(ty)
-    tx = KL.Activation('sigmoid')(tx)
 
-    detection = KL.Concatenate(axis=-1)([ty, tx, th, tw])
+    object_loss = K.mean(K.binary_crossentropy(to, target_object))
+
+    return object_loss
+
+
+def yolo_bbox_loss(detection, target_bbox, target_bbox_object):
+    """
+
+    :param detection: None, num_anchors, 5
+    :param target_bbox: None, num_anchors, 4
+    :param target_bbox_object: None, num_anchors
+    :return:
+    """
+    tx = K.expand_dims(detection[..., 1], axis=-1)
+    ty = K.expand_dims(detection[..., 2], axis=-1)
+    tw = K.expand_dims(detection[..., 3], axis=-1)
+    th = K.expand_dims(detection[..., 4], axis=-1)
+
+    tx = KL.Activation('sigmoid')(tx)
+    ty = KL.Activation('sigmoid')(ty)
+
+    detection = KL.Concatenate(axis=-1)([tx, ty, tw, th])
 
     # sum of squared error loss
-    object_loss = K.mean(K.binary_crossentropy(to, target_object))
     bbox_loss = K.sum(K.sum(K.square(detection - target_bbox), axis=-1) * target_bbox_object)
 
-    loss = object_loss + bbox_loss
-
-    return loss
+    return bbox_loss
 
 
 #####################################################################
@@ -162,7 +175,7 @@ def translate_bbox(bbox, input_shape, output_shape):
 
 
 def assign_bbox_to_anchors(config, image_bbox, anchors, image_id):
-    feature_stride = float(config.FEATURE_STRIDE)
+    # feature_stride = float(config.FEATURE_STRIDE)
 
     gt_target_object = np.zeros(anchors.shape[0]).astype("float32")
     gt_target_bbox = np.zeros(anchors.shape).astype("float32")
@@ -180,7 +193,7 @@ def assign_bbox_to_anchors(config, image_bbox, anchors, image_id):
     max_t = []
     max_index = 0
     for i, anchor in enumerate(anchors):
-        py, px, ph, pw = anchor
+        py, px, ph, pw, feature_stride = anchor
         py += feature_stride / 2
         px += feature_stride / 2
         px1, py1, px2, py2 = px - pw / 2, py - ph / 2, px + pw / 2, py + ph / 2
@@ -228,6 +241,44 @@ def iou(bb, bbgt):
     return ov
 
 ###########################################
+# Process outputs
+###########################################
+
+
+def process_detection(detection, anchors):
+    """
+
+    :param detection: num_anchors, 5
+    :param anchors: num_anchors, 5
+    :return: best_bbox Int[x1, y1, x2, y2]
+    """
+    assert detection.ndim == 2, "Input detection is not a 2D array"
+
+    objectiveness = detection[..., 0]
+    tx = detection[..., 1]
+    ty = detection[..., 2]
+    tw = detection[..., 3]
+    th = detection[..., 4]
+
+    best_index = np.argmax(objectiveness)
+    best_anchor = anchors[best_index] # xc, yc, w, h, feature_stride
+    best_tx = tx[best_index]
+    best_ty = ty[best_index]
+    best_tw = tw[best_index]
+    best_th = th[best_index]
+
+    best_xc = best_anchor[0] + best_tx*best_anchor[-1]
+    best_yc = best_anchor[1] + best_ty*best_anchor[-1]
+    best_w = best_anchor[2] * np.exp(best_tw)
+    best_h = best_anchor[3] * np.exp(best_th)
+
+    # x1, y1, x2, y2
+    best_bbox = [int(best_xc-best_w/2), int(best_yc-best_h/2), int(best_xc+best_w/2), int(best_yc+best_h+2)]
+
+    return best_bbox
+
+
+###########################################
 # ZSL Model
 ###########################################
 class ZSL():
@@ -240,7 +291,7 @@ class ZSL():
         config: A Sub-class of the Config class
         model_dir: Directory to save training logs and trained weights
         """
-        assert mode in ['training', 'inference']
+        assert mode in ['training', 'detection', 'inference']
         self.mode = mode
         self.config = config
         self.model_dir = model_dir
@@ -249,9 +300,18 @@ class ZSL():
 
     def build(self, mode, config):
 
+        # build anchors
+        anchors = []
+        for i, scale in enumerate(config.ANCHOR_SCALES):
+            anchors.append(
+                utils.generate_anchors(scales=scale, ratios=config.ANCHOR_RATIOS, shape=[8 * 2 ** i, 8 * 2 ** i],
+                                       feature_stride=config.FEATURE_STRIDE / (2 ** i), anchor_stride=1))
+        self.anchors = np.concatenate(anchors, axis=0)
+
         # Define the input layers
         input_image = KL.Input(shape=config.IMAGE_SHAPE, name="input_image")
-        input_attribute = KL.Input(shape=[config.NUM_ATTRIBUTE], name="input_features")
+        if not self.mode == 'detection':
+            input_attribute = KL.Input(shape=[config.NUM_ATTRIBUTE], name="input_features")
 
         # darknet53
         S1, S2, S3, S4, S5 = darknet_graph(input_image, architecture='darknet53')
@@ -317,13 +377,15 @@ class ZSL():
             gt_object = KL.Input(shape=[num_anchors], name="ground_truth_object")
 
             # Define the loss
-            loss = KL.Lambda(lambda x: yolo_loss(*x), name='yolo_loss')([detection, gt_object, gt_bbox, gt_bbox_object])
+            object_loss = KL.Lambda(lambda x: yolo_object_loss(*x), name='yolo_object_loss')([detection, gt_object])
+            bbox_loss = KL.Lambda(lambda x: yolo_bbox_loss(*x), name='yolo_bbox_loss')(
+                [detection, gt_bbox, gt_bbox_object])
 
-            # print(type(loss))
-            return KM.Model([input_image, input_attribute, gt_object, gt_bbox, gt_bbox_object], [image_feature, detection, loss])
+            return KM.Model([input_image, input_attribute, gt_object, gt_bbox, gt_bbox_object],
+                            [image_feature, detection, object_loss, bbox_loss])
 
-        if mode == 'inference':
-            pass
+        if mode == 'detection':
+            return KM.Model([input_image], [detection])
 
     def compile(self, learning_rate, momentum):
         """Gets the model ready for training. Adds losses, regularization, and
@@ -336,7 +398,7 @@ class ZSL():
         # First, clear previously set losses to avoid duplication
         self.keras_model._losses = []
         self.keras_model._per_input_losses = {}
-        loss_names = ["yolo_loss"]
+        loss_names = ["yolo_bbox_loss", "yolo_object_loss"]
         for name in loss_names:
             layer = self.keras_model.get_layer(name)
             if layer.output in self.keras_model.losses:
@@ -362,6 +424,77 @@ class ZSL():
             self.keras_model.metrics_names.append(name)
             self.keras_model.metrics_tensors.append(tf.reduce_mean(
                 layer.output, keep_dims=True))
+
+    def detect(self, images, verbose=False):
+        """
+        Detection pipeline
+        :param images:
+        :param verbose:
+        :return:
+        """
+        assert self.mode == "inference", "Create the model in inference mode"
+        assert len(images) == self.config.BATCH_SIZE, "Number of images must be the same as the batch size"
+
+        if verbose:
+            log("Processing {} images".format(len(images)))
+            for image in images:
+                log("image", image)
+
+        # modify input
+        mold_images = []
+        for image in images:
+            image = cv2.resize(image, self.config.IMAGE_SHAPE)
+            mold_images.append(image)
+        mold_images = np.stack(mold_images)
+
+        # detection
+        detections = self.keras_model.predict([mold_images])
+
+        # process detection
+        bounding_boxes = []
+        for det in detections:
+            bbox = process_detection(det, self.anchors)
+            bounding_boxes.append(bbox)
+
+        return bounding_boxes
+
+    def load_weights(self, filepath, by_name=False, exclude=None):
+        """Modified version of the correspoding Keras function with
+        the addition of multi-GPU support and the ability to exclude
+        some layers from loading.
+        exlude: list of layer names to excluce
+        """
+        import h5py
+        from keras.engine import topology
+
+        if exclude:
+            by_name = True
+
+        if h5py is None:
+            raise ImportError('`load_weights` requires h5py.')
+        f = h5py.File(filepath, mode='r')
+        if 'layer_names' not in f.attrs and 'model_weights' in f:
+            f = f['model_weights']
+
+        # In multi-GPU training, we wrap the model. Get layers
+        # of the inner model because they have the weights.
+        keras_model = self.keras_model
+        layers = keras_model.inner_model.layers if hasattr(keras_model, "inner_model") \
+            else keras_model.layers
+
+        # Exclude some layers
+        if exclude:
+            layers = filter(lambda l: l.name not in exclude, layers)
+
+        if by_name:
+            topology.load_weights_from_hdf5_group_by_name(f, layers)
+        else:
+            topology.load_weights_from_hdf5_group(f, layers)
+        if hasattr(f, 'close'):
+            f.close()
+
+        # Update the log directory
+        self.set_log_dir(filepath)
 
     def set_log_dir(self, model_path=None):
         """Sets the model log directory and epoch counter.
