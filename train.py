@@ -15,7 +15,11 @@ def train():
     model.keras_model.summary()
 
     # Prepare the dataset
-    data_path = os.path.join(os.getcwd(), '../cai_zsl/data/train_test_a/zsl_a_animals_train_20180321')
+    if sys.platform == 'darwin':
+        data_path = os.path.join(os.getcwd(), '../data/train_test_a/zsl_a_animals_train_20180321')
+    else:
+        data_path = os.path.join(os.getcwd(), '../cai_zsl/data/train_test_a/zsl_a_animals_train_20180321')
+        
     train_dataset = CAIData(root_dir=data_path, mode="train")
     train_dataset.prepare()
 
@@ -25,7 +29,7 @@ def train():
     # Training
     model.train(train_dataset, val_dataset, 
             learning_rate=config.LEARNING_RATE, 
-            epochs=10)
+            epochs=15)
     
     
 if __name__ == "__main__":

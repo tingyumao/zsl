@@ -58,6 +58,16 @@ def yolo_object_loss(detection, target_object):
     return object_loss
 
 
+def yolo_bbox_object_loss(detection, target_bbox_object):
+    to = detection[..., 0]
+    to = KL.Activation('sigmoid')(to)
+    
+    # loss of object
+    bbox_object_loss = K.sum(K.binary_crossentropy(to*target_bbox_object, target_bbox_object))
+    
+    return bbox_object_loss
+    
+
 def yolo_bbox_loss(detection, target_bbox, target_bbox_object):
     """
 
@@ -75,7 +85,7 @@ def yolo_bbox_loss(detection, target_bbox, target_bbox_object):
     ty = KL.Activation('sigmoid')(ty)
 
     detection = KL.Concatenate(axis=-1)([tx, ty, tw, th])
-
+    
     # sum of squared error loss
     bbox_loss = K.sum(K.sum(K.square(detection - target_bbox), axis=-1) * target_bbox_object)
 
@@ -178,7 +188,7 @@ def assign_bbox_to_anchors(config, image_bbox, anchors, image_id):
     # feature_stride = float(config.FEATURE_STRIDE)
 
     gt_target_object = np.zeros(anchors.shape[0]).astype("float32")
-    gt_target_bbox = np.zeros(anchors.shape).astype("float32")
+    gt_target_bbox = np.zeros((anchors.shape[0], 4)).astype("float32")
     gt_target_bbox_object = np.zeros(anchors.shape[0]).astype("float32")
 
     y1, x1, y2, x2 = image_bbox
@@ -245,11 +255,12 @@ def iou(bb, bbgt):
 ###########################################
 
 
-def process_detection(detection, anchors):
+def process_detection(detection, anchors, best_index):
     """
 
     :param detection: num_anchors, 5
     :param anchors: num_anchors, 5
+    :param best_index: (Int) for debug
     :return: best_bbox Int[x1, y1, x2, y2]
     """
     assert detection.ndim == 2, "Input detection is not a 2D array"
@@ -259,21 +270,27 @@ def process_detection(detection, anchors):
     ty = detection[..., 2]
     tw = detection[..., 3]
     th = detection[..., 4]
-
-    best_index = np.argmax(objectiveness)
+    
+    # best_index = np.argmax(objectiveness)
     best_anchor = anchors[best_index] # xc, yc, w, h, feature_stride
     best_tx = tx[best_index]
     best_ty = ty[best_index]
     best_tw = tw[best_index]
     best_th = th[best_index]
 
-    best_xc = best_anchor[0] + best_tx*best_anchor[-1]
-    best_yc = best_anchor[1] + best_ty*best_anchor[-1]
-    best_w = best_anchor[2] * np.exp(best_tw)
-    best_h = best_anchor[3] * np.exp(best_th)
+    best_xc = best_anchor[1] + best_tx*best_anchor[-1]
+    best_yc = best_anchor[0] + best_ty*best_anchor[-1]
+    best_w = best_anchor[3] * np.exp(best_tw)
+    best_h = best_anchor[2] * np.exp(best_th)
+    
+    print("*"*80)
+    print(objectiveness[best_index])
+    print(np.sum(objectiveness == objectiveness[best_index]))
+    print(best_anchor)
+    print(best_tx, best_ty, best_tw, best_th)
 
     # x1, y1, x2, y2
-    best_bbox = [int(best_xc-best_w/2), int(best_yc-best_h/2), int(best_xc+best_w/2), int(best_yc+best_h+2)]
+    best_bbox = [int(best_xc-best_w/2), int(best_yc-best_h/2), int(best_xc+best_w/2), int(best_yc+best_h/2)]
 
     return best_bbox
 
@@ -378,13 +395,33 @@ class ZSL():
 
             # Define the loss
             object_loss = KL.Lambda(lambda x: yolo_object_loss(*x), name='yolo_object_loss')([detection, gt_object])
-            bbox_loss = KL.Lambda(lambda x: yolo_bbox_loss(*x), name='yolo_bbox_loss')(
-                [detection, gt_bbox, gt_bbox_object])
+            bbox_loss = KL.Lambda(lambda x: yolo_bbox_loss(*x), 
+                                  name='yolo_bbox_loss')([detection, gt_bbox, gt_bbox_object])
+            bbox_object_loss = KL.Lambda(lambda x: yolo_bbox_object_loss(*x), 
+                                         name='yolo_bbox_object_loss')([detection, gt_bbox_object])
 
             return KM.Model([input_image, input_attribute, gt_object, gt_bbox, gt_bbox_object],
-                            [image_feature, detection, object_loss, bbox_loss])
+                            [image_feature, detection, object_loss, bbox_loss, bbox_object_loss])
 
         if mode == 'detection':
+            def transform_detection(detection):
+                to = K.expand_dims(detection[..., 0], axis=-1)
+                to = KL.Activation('sigmoid')(to)
+
+                tx = K.expand_dims(detection[..., 1], axis=-1)
+                ty = K.expand_dims(detection[..., 2], axis=-1)
+                tw = K.expand_dims(detection[..., 3], axis=-1)
+                th = K.expand_dims(detection[..., 4], axis=-1)
+
+                tx = KL.Activation('sigmoid')(tx)
+                ty = KL.Activation('sigmoid')(ty)
+
+                detection = KL.Concatenate(name="final_transformed_detection", axis=-1)([to, tx, ty, tw, th])
+                
+                return detection
+            
+            detection = KL.Lambda(lambda x: transform_detection(x), name="transform_final_detection")(detection)
+            
             return KM.Model([input_image], [detection])
 
     def compile(self, learning_rate, momentum):
@@ -398,7 +435,8 @@ class ZSL():
         # First, clear previously set losses to avoid duplication
         self.keras_model._losses = []
         self.keras_model._per_input_losses = {}
-        loss_names = ["yolo_bbox_loss", "yolo_object_loss"]
+        #loss_names = ["yolo_bbox_loss", "yolo_object_loss", "yolo_bbox_object_loss"]
+        loss_names = ["yolo_bbox_loss"]
         for name in loss_names:
             layer = self.keras_model.get_layer(name)
             if layer.output in self.keras_model.losses:
@@ -425,14 +463,14 @@ class ZSL():
             self.keras_model.metrics_tensors.append(tf.reduce_mean(
                 layer.output, keep_dims=True))
 
-    def detect(self, images, verbose=False):
+    def detect(self, images, best_indexes, verbose=False):
         """
         Detection pipeline
         :param images:
         :param verbose:
         :return:
         """
-        assert self.mode == "inference", "Create the model in inference mode"
+        assert self.mode == "detection", "Create the model in detection mode"
         assert len(images) == self.config.BATCH_SIZE, "Number of images must be the same as the batch size"
 
         if verbose:
@@ -443,7 +481,7 @@ class ZSL():
         # modify input
         mold_images = []
         for image in images:
-            image = cv2.resize(image, self.config.IMAGE_SHAPE)
+            image = cv2.resize(image, tuple(self.config.IMAGE_SHAPE[:2]))
             mold_images.append(image)
         mold_images = np.stack(mold_images)
 
@@ -452,8 +490,8 @@ class ZSL():
 
         # process detection
         bounding_boxes = []
-        for det in detections:
-            bbox = process_detection(det, self.anchors)
+        for i, det in enumerate(detections):
+            bbox = process_detection(det, self.anchors, best_indexes[i])
             bounding_boxes.append(bbox)
 
         return bounding_boxes

@@ -140,6 +140,8 @@ class CAIData(object):
         :param image_id:
         :return: image, image shape (different raw image has different size.)
         """
+        assert image_id in self.image_ids, "Input image id is not in this dataset"
+        
         attr_type = self.image_type_info[image_id]
         if attr_type == "self":
             path, _, _ = self.image_annotated_info[image_id] # path, image_class_label, bbox
@@ -155,6 +157,8 @@ class CAIData(object):
         :param image_id:
         :return: bbox, class_index, attribute, attr_type["self", "class"]
         """
+        assert image_id in self.image_ids, "Input image id is not in this dataset"
+        
         attr_type = self.image_type_info[image_id]
         if attr_type == "self":
             path, image_class_label, bbox = self.image_annotated_info[image_id]  # path, image_class_label, bbox
@@ -176,6 +180,8 @@ class CAIData(object):
         :param image_id:
         :return:
         """
+        assert image_id in self.image_ids, "Input image id is not in this dataset"
+        
         attr_type = self.image_type_info[image_id]
         if attr_type == "self":
             path, image_class_label, bbox = self.image_annotated_info[image_id]  # path, image_class_label, bbox
